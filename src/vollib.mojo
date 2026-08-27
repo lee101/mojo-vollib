@@ -1,12 +1,10 @@
-from std.algorithm import parallelize
 from std.math import abs, erfc, exp, log, sqrt
-from std.sys.info import num_physical_cores, simd_width_of
+from std.sys.info import simd_width_of
 
-comptime FPtr = UnsafePointer[Float64, AnyOrigin[mut=True]]
-comptime BPtr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
+comptime FPtr = Pointer[Float64, AnyOrigin[mut=True]]
+comptime BPtr = Pointer[UInt8, AnyOrigin[mut=True]]
 comptime INV_SQRT_TWO = 0.707106781186547524400844362104849039
 comptime INV_SQRT_TWO_PI = 0.398942280401432677939946059934381868
-comptime PARALLEL_THRESHOLD = 65536
 
 
 @always_inline
@@ -173,8 +171,13 @@ def price_range(
     end: Int,
 ):
     for i in range(begin, end):
-        dst[i] = price_value(
-            flags[i] == 1, spots[i], strikes[i], times[i], rates[i], sigmas[i]
+        dst[unsafe_offset=i] = price_value(
+            flags[unsafe_offset=i] == 1,
+            spots[unsafe_offset=i],
+            strikes[unsafe_offset=i],
+            times[unsafe_offset=i],
+            rates[unsafe_offset=i],
+            sigmas[unsafe_offset=i],
         )
 
 
@@ -197,12 +200,12 @@ def greeks_range(
     var i = begin
     var vector_end = end - (end - begin) % W
     while i < vector_end:
-        var flag_values = flags.load[width=W](i)
-        var spot_values = spots.load[width=W](i)
-        var strike_values = strikes.load[width=W](i)
-        var time_values = times.load[width=W](i)
-        var rate_values = rates.load[width=W](i)
-        var sigma_values = sigmas.load[width=W](i)
+        var flag_values = flags.unsafe_load[width=W](i)
+        var spot_values = spots.unsafe_load[width=W](i)
+        var strike_values = strikes.unsafe_load[width=W](i)
+        var time_values = times.unsafe_load[width=W](i)
+        var rate_values = rates.unsafe_load[width=W](i)
+        var sigma_values = sigmas.unsafe_load[width=W](i)
         var root_times = sqrt(time_values)
         var d1 = (
             log(spot_values / strike_values)
@@ -214,13 +217,13 @@ def greeks_range(
         var cdf_d1 = norm_cdf_vector(d1)
         var call_mask = flag_values.eq(1)
 
-        deltas.store(i, call_mask.select(cdf_d1, cdf_d1 - 1.0))
-        gammas.store(i, pdf_d1 / (spot_values * sigma_values * root_times))
+        deltas.unsafe_store(i, call_mask.select(cdf_d1, cdf_d1 - 1.0))
+        gammas.unsafe_store(i, pdf_d1 / (spot_values * sigma_values * root_times))
         var first = -spot_values * pdf_d1 * sigma_values / (2.0 * root_times)
         var rho_scales = time_values * strike_values * discounts * 0.01
         var cdf_d2 = norm_cdf_vector(d2)
         var cdf_negative_d2 = norm_cdf_vector(-d2)
-        thetas.store(
+        thetas.unsafe_store(
             i,
             call_mask.select(
                 (
@@ -233,8 +236,8 @@ def greeks_range(
                 ) / 365.0,
             ),
         )
-        vegas.store(i, spot_values * pdf_d1 * root_times * 0.01)
-        rhos.store(
+        vegas.unsafe_store(i, spot_values * pdf_d1 * root_times * 0.01)
+        rhos.unsafe_store(
             i,
             call_mask.select(
                 rho_scales * cdf_d2,
@@ -244,12 +247,12 @@ def greeks_range(
         i += W
 
     for scalar_i in range(i, end):
-        var is_call = flags[scalar_i] == 1
-        var S = spots[scalar_i]
-        var K = strikes[scalar_i]
-        var t = times[scalar_i]
-        var r = rates[scalar_i]
-        var sigma = sigmas[scalar_i]
+        var is_call = flags[unsafe_offset=scalar_i] == 1
+        var S = spots[unsafe_offset=scalar_i]
+        var K = strikes[unsafe_offset=scalar_i]
+        var t = times[unsafe_offset=scalar_i]
+        var r = rates[unsafe_offset=scalar_i]
+        var sigma = sigmas[unsafe_offset=scalar_i]
         var root_t = sqrt(t)
         var d1 = (log(S / K) + (r + 0.5 * sigma * sigma) * t) / (sigma * root_t)
         var d2 = d1 - sigma * root_t
@@ -257,19 +260,21 @@ def greeks_range(
         var discount = exp(-r * t)
         var cdf_d1 = norm_cdf(d1)
 
-        deltas[scalar_i] = cdf_d1 if is_call else cdf_d1 - 1.0
-        gammas[scalar_i] = pdf_d1 / (S * sigma * root_t)
+        deltas[unsafe_offset=scalar_i] = cdf_d1 if is_call else cdf_d1 - 1.0
+        gammas[unsafe_offset=scalar_i] = pdf_d1 / (S * sigma * root_t)
         var first = -S * pdf_d1 * sigma / (2.0 * root_t)
         var rho_scale = t * K * discount * 0.01
         if is_call:
-            thetas[scalar_i] = (first - r * K * discount * norm_cdf(d2)) / 365.0
-            rhos[scalar_i] = rho_scale * norm_cdf(d2)
+            thetas[unsafe_offset=scalar_i] = (
+                first - r * K * discount * norm_cdf(d2)
+            ) / 365.0
+            rhos[unsafe_offset=scalar_i] = rho_scale * norm_cdf(d2)
         else:
-            thetas[scalar_i] = (
+            thetas[unsafe_offset=scalar_i] = (
                 first + r * K * discount * norm_cdf(-d2)
             ) / 365.0
-            rhos[scalar_i] = -rho_scale * norm_cdf(-d2)
-        vegas[scalar_i] = S * pdf_d1 * root_t * 0.01
+            rhos[unsafe_offset=scalar_i] = -rho_scale * norm_cdf(-d2)
+        vegas[unsafe_offset=scalar_i] = S * pdf_d1 * root_t * 0.01
 
 
 @export("mv_black_scholes_batch")
@@ -293,19 +298,7 @@ def mv_black_scholes_batch(
     var sigmas = FPtr(unsafe_from_address=sigmas_addr)
     var dst = FPtr(unsafe_from_address=dst_addr)
 
-    if n < PARALLEL_THRESHOLD:
-        price_range(flags, spots, strikes, times, rates, sigmas, dst, 0, n)
-        return
-
-    var workers = min(n, num_physical_cores())
-
-    @parameter
-    def work(worker: Int):
-        var begin = worker * n // workers
-        var end = (worker + 1) * n // workers
-        price_range(flags, spots, strikes, times, rates, sigmas, dst, begin, end)
-
-    parallelize[work](workers, workers)
+    price_range(flags, spots, strikes, times, rates, sigmas, dst, 0, n)
 
 
 @export("mv_greeks_batch")
@@ -337,44 +330,18 @@ def mv_greeks_batch(
     var vegas = FPtr(unsafe_from_address=vegas_addr)
     var rhos = FPtr(unsafe_from_address=rhos_addr)
 
-    if n < PARALLEL_THRESHOLD:
-        greeks_range(
-            flags,
-            spots,
-            strikes,
-            times,
-            rates,
-            sigmas,
-            deltas,
-            gammas,
-            thetas,
-            vegas,
-            rhos,
-            0,
-            n,
-        )
-        return
-
-    var workers = min(n, num_physical_cores())
-
-    @parameter
-    def work(worker: Int):
-        var begin = worker * n // workers
-        var end = (worker + 1) * n // workers
-        greeks_range(
-            flags,
-            spots,
-            strikes,
-            times,
-            rates,
-            sigmas,
-            deltas,
-            gammas,
-            thetas,
-            vegas,
-            rhos,
-            begin,
-            end,
-        )
-
-    parallelize[work](workers, workers)
+    greeks_range(
+        flags,
+        spots,
+        strikes,
+        times,
+        rates,
+        sigmas,
+        deltas,
+        gammas,
+        thetas,
+        vegas,
+        rhos,
+        0,
+        n,
+    )
