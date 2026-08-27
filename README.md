@@ -94,17 +94,19 @@ Intel(R) Xeon(R) CPU E5-2697 v4 @ 2.30GHz | Linux x86_64
 
 | benchmark | mojo-vollib | upstream py-vollib | speedup |
 | --- | ---: | ---: | ---: |
-| scalar price x 100k | 76.72 ms | 550.04 ms | 7.17x |
-| batch price x 250k | 14.70 ms | 1279.90 ms | 87.07x |
-| all 5 Greeks x 100k | 12.36 ms | 2629.10 ms | 212.78x |
+| scalar price x 100k | 91.65 ms | 515.22 ms | 5.62x |
+| batch price x 250k | 29.44 ms | 1540.61 ms | 52.33x |
+| all 5 Greeks x 100k | 9.91 ms | 2533.82 ms | 255.61x |
 
 These are best-of-three wall-clock measurements on identical inputs. The scalar
 row includes one CFFI crossing per price. The batch rows compare a single Mojo
 batch call with upstream's scalar API applied across the same portfolio; the
-large gain comes from removing Python call overhead, SIMD and parallel
-execution, and computing shared Greek intermediates once.
+large gain comes from removing Python call overhead, SIMD execution in the
+five-Greek kernel, and computing shared Greek intermediates once.
 
-No GPU path is shipped.
+No GPU path is shipped. Profiling found no parity-or-slower kernel to target:
+all measured CPU paths are already more than 5x faster than upstream, so GPU
+work was skipped under the benchmark-first optimization rule.
 
 Run the benchmark on another machine with:
 
@@ -115,11 +117,10 @@ pixi run bench
 ## How it works
 
 All kernels live in one Mojo compilation unit. Scalar exports calculate a single
-price or Greek. Batch exports process contiguous `float64` arrays, parallelizing
-portfolios of at least 65,536 options across physical CPU cores. The five-Greek
-kernel uses the native `float64` SIMD width with unaligned-safe loads and stores,
-then handles the remainder in a scalar tail. It shares `d1`, `d2`, the normal
-density, the discount factor, and square root of time in one pass.
+price or Greek. Batch exports process contiguous `float64` arrays serially. The
+five-Greek kernel uses the native `float64` SIMD width with unaligned-safe loads
+and stores, then handles the remainder in a scalar tail. It shares `d1`, `d2`,
+the normal density, the discount factor, and square root of time in one pass.
 
 Python owns every allocation. The wrapper broadcasts inputs with NumPy, converts
 them to C-contiguous `float64` arrays plus a one-byte call/put flag array, and
